@@ -1,0 +1,36 @@
+# Roma BYOB UDF Benchmarking
+
+## Overview
+
+The Roma Benchmark CLI tool provides functionality for User Defined Function (UDF) developers to
+benchmark their code. It executes the UDF within the Roma BYOB execution environment, providing
+additional visibility to help developers better understand the runtime cost of their UDF.
+Load and execute are independently benchmarked, in the `BM_Load` and `BM_Execute` benchmarks
+respectively. The tool uses the google microbenchmarking library and supports the standard set of
+benchmarking flags, such as `--benchmark_time_unit` and `--benchmark_filter`. In addition to the
+benchmarking flags, the Roma Benchmarking CLI includes command-line flags to specify the path to the UDF
+to be benchmarked, the path to a json file to be supplied to the UDF as input, and the RPC to execute.
+
+Run with:
+```
+docker load -i tools/benchmark-cli.tar
+docker run \
+  --privileged \
+  -it \
+  --rm \
+  --volume /absolute/path/my_udfs:/udf \
+  privacy-sandbox/sample-byob-sdk/roma-byob/benchmark:v1 \
+  <flags>
+```
+
+## Flags
+
+| Flag                     | Description                                                                     |
+| -------------------------| --------------------------------------------------------------------------------|
+| `--connection_timeout`   | How long to wait for a worker to become available.                              |
+| `--disable_ipc_namespace | Whether IPC namespace should be disabled.                                       |
+| `--request`              | File for the UDF request, in json format.                                       |
+| `--rpc`                  | Name of the RPC method to invoke.                                               |
+| `--sandbox`              | Sandbox mode for BYOB. Supported values: gvisor, gvisor-debug, minimal, nsjail. |
+| `--syscall_filtering`    | Syscall filter level for BYOB. Supported values: no, reloader, reloader-and-worker.          |
+| `--udf`                  | UDF executable to be benchmarked.                                               |

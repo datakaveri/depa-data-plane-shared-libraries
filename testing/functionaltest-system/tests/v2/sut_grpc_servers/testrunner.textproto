@@ -1,0 +1,23 @@
+name: "functionaltest-v2-test-sut"
+
+stages: {
+  command: {
+    bazel: {
+      test_targets: "//test_cases:all_tests"
+    }
+  }
+}
+stages: {
+  command: {
+    shell: {
+      command: "./myapp"
+    }
+  }
+}
+stages: {
+  command: {
+    bazel: {
+      test_targets: "//test_cases:all_tests"
+    }
+  }
+}
