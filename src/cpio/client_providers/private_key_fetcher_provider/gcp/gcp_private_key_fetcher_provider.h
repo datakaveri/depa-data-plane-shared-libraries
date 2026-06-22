@@ -29,6 +29,13 @@
 
 namespace google::scp::cpio::client_providers {
 /*! @copydoc PrivateKeyFetcherProviderInterface
+ *
+ * GCP Confidential Space variant that talks to the iSPIRT/DEPA KMS
+ * (`POST /app/key?fmt=tink`) instead of Google's Privacy Sandbox coordinator.
+ * Authorization is a Confidential Space OIDC attestation token
+ * (issuer confidentialcomputing.googleapis.com) carried as a Bearer header;
+ * the response is the iSPIRT `{wrappedKid, wrapped}` envelope, parsed the same
+ * way as the Azure provider.
  */
 class GcpPrivateKeyFetcherProvider : public PrivateKeyFetcherProvider {
  public:
@@ -36,8 +43,9 @@ class GcpPrivateKeyFetcherProvider : public PrivateKeyFetcherProvider {
    * @brief Constructs a new GCP Private Key Fetching Client Provider object.
    *
    * @param http_client http client to issue http requests.
-   * @param auth_token_provider auth token provider.
-   * service.
+   * @param auth_token_provider auth token provider (retained for interface
+   *        compatibility; the Confidential Space token is fetched directly from
+   *        the launcher socket).
    */
   GcpPrivateKeyFetcherProvider(
       core::HttpClientInterface* http_client,
@@ -50,25 +58,36 @@ class GcpPrivateKeyFetcherProvider : public PrivateKeyFetcherProvider {
 
   core::ExecutionResult Init() noexcept override;
 
+  core::ExecutionResult FetchPrivateKey(
+      core::AsyncContext<PrivateKeyFetchingRequest, PrivateKeyFetchingResponse>&
+          private_key_fetching_context) noexcept override;
+
   core::ExecutionResult SignHttpRequest(
       core::AsyncContext<PrivateKeyFetchingRequest, core::HttpRequest>&
           sign_http_request_context) noexcept override;
 
- private:
+ protected:
   /**
-   * @brief Is called after auth_token_provider GetSessionToken() for session
-   * token is completed
-   *
-   * @param sign_http_request_context the context for sign http request.
-   * @param get_session_token the context of get session token.
+   * @brief Triggered to fetch private key when http request is signed.
    */
-  void OnGetSessionTokenCallback(
+  void SignHttpRequestCallback(
+      core::AsyncContext<PrivateKeyFetchingRequest, PrivateKeyFetchingResponse>&
+          private_key_fetching_context,
       core::AsyncContext<PrivateKeyFetchingRequest, core::HttpRequest>&
-          sign_http_request_context,
-      core::AsyncContext<GetSessionTokenForTargetAudienceRequest,
-                         GetSessionTokenResponse>& get_session_token) noexcept;
+          sign_http_request_context) noexcept;
 
-  // Auth token provider.
+  /**
+   * @brief Triggered to parse private key when private key payload is fetched.
+   */
+  void PrivateKeyFetchingCallback(
+      core::AsyncContext<PrivateKeyFetchingRequest, PrivateKeyFetchingResponse>&
+          private_key_fetching_context,
+      core::AsyncContext<core::HttpRequest, core::HttpResponse>&
+          http_client_context) noexcept;
+
+ private:
+  // Auth token provider (retained for factory/interface compatibility; the
+  // Confidential Space attestation token is fetched from the launcher socket).
   AuthTokenProviderInterface* auth_token_provider_;
 };
 }  // namespace google::scp::cpio::client_providers

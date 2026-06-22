@@ -16,14 +16,16 @@
 
 #include "gcp_private_key_fetcher_provider.h"
 
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
-#include "absl/functional/bind_front.h"
-#include "absl/strings/escaping.h"
+#include <nlohmann/json.hpp>
+
 #include "absl/strings/str_cat.h"
-#include "openssl/curve25519.h"
 #include "src/core/interface/http_client_interface.h"
+#include "src/cpio/client_providers/confidential_space/confidential_space_token_fetcher.h"
 #include "src/cpio/client_providers/interface/auth_token_provider_interface.h"
 #include "src/cpio/client_providers/interface/role_credentials_provider_interface.h"
 #include "src/cpio/client_providers/private_key_fetcher_provider/private_key_fetcher_provider_utils.h"
@@ -32,21 +34,33 @@
 #include "error_codes.h"
 
 using google::scp::core::AsyncContext;
+using google::scp::core::BytesBuffer;
 using google::scp::core::ExecutionResult;
 using google::scp::core::FailureExecutionResult;
 using google::scp::core::HttpClientInterface;
 using google::scp::core::HttpHeaders;
+using google::scp::core::HttpMethod;
 using google::scp::core::HttpRequest;
+using google::scp::core::HttpResponse;
 using google::scp::core::SuccessExecutionResult;
+using google::scp::core::Uri;
 using google::scp::core::common::kZeroUuid;
 using google::scp::core::errors::
     SC_GCP_PRIVATE_KEY_FETCHER_PROVIDER_CREDENTIALS_PROVIDER_NOT_FOUND;
+using std::bind;
+using std::placeholders::_1;
 
 namespace {
 constexpr std::string_view kGcpPrivateKeyFetcherProvider =
     "GcpPrivateKeyFetcherProvider";
-constexpr std::string_view kAuthorizationHeaderKey = "Authorization";
-constexpr std::string_view kBearerTokenPrefix = "Bearer ";
+constexpr char kAuthorizationHeaderKey[] = "Authorization";
+constexpr char kBearerTokenPrefix[] = "Bearer ";
+constexpr char kAttestationType[] = "attestationType";
+constexpr char kGcp[] = "gcp";
+
+// iSPIRT KMS /key (and /unwrapKey) response field names.
+constexpr char kWrappedKid[] = "wrappedKid";
+constexpr char kWrapped[] = "wrapped";
 }  // namespace
 
 namespace google::scp::cpio::client_providers {
@@ -59,11 +73,6 @@ ExecutionResult GcpPrivateKeyFetcherProvider::Init() noexcept {
         SC_GCP_PRIVATE_KEY_FETCHER_PROVIDER_CREDENTIALS_PROVIDER_NOT_FOUND);
     SCP_ERROR(kGcpPrivateKeyFetcherProvider, kZeroUuid, execution_result,
               "Failed to get credentials provider.");
-    auto error_message = google::scp::core::errors::GetErrorMessage(
-        execution_result.status_code);
-    PS_LOG(ERROR, log_context_)
-        << "Failed to get credentials provider. Error message: "
-        << error_message;
     return execution_result;
   }
 
@@ -73,74 +82,156 @@ ExecutionResult GcpPrivateKeyFetcherProvider::Init() noexcept {
 ExecutionResult GcpPrivateKeyFetcherProvider::SignHttpRequest(
     AsyncContext<PrivateKeyFetchingRequest, core::HttpRequest>&
         sign_request_context) noexcept {
-  // Generate an ephemeral X25519 key pair. The public key is sent as the nonce
-  // in the OIDC token so the vending service can verify and encrypt the
-  // returned key material specifically for this TEE instance.
-  uint8_t pub_key[X25519_PUBLIC_VALUE_LEN];
-  uint8_t priv_key[X25519_PRIVATE_KEY_LEN];
-  X25519_keypair(pub_key, priv_key);
+  const auto& endpoint = sign_request_context.request->key_vending_endpoint
+                             ->private_key_vending_service_endpoint;
 
-  // Stash private key bytes in the request so OnFetchPrivateKeyCallback can
-  // use them to decrypt the vending service response.
-  sign_request_context.request->ephemeral_private_key_bytes =
-      std::string(reinterpret_cast<const char*>(priv_key), X25519_PRIVATE_KEY_LEN);
+  // Fetch a Confidential Space attestation token from the launcher. No nonce is
+  // needed for /app/key — the wrapping-key binding only applies to /unwrapKey.
+  // The audience is the KMS endpoint (the KMS validation policy does not pin
+  // `aud`).
+  auto token_or = FetchConfidentialSpaceToken(endpoint, /*nonces=*/{});
+  if (!token_or.ok()) {
+    auto execution_result = FailureExecutionResult(
+        SC_GCP_PRIVATE_KEY_FETCHER_PROVIDER_CREDENTIALS_PROVIDER_NOT_FOUND);
+    SCP_ERROR_CONTEXT(kGcpPrivateKeyFetcherProvider, sign_request_context,
+                      execution_result,
+                      "Failed to fetch Confidential Space token: %s",
+                      token_or.status().ToString().c_str());
+    sign_request_context.result = execution_result;
+    sign_request_context.Finish();
+    return execution_result;
+  }
 
-  // Base64-encode the public key to use as the OIDC nonce.
-  std::string pub_key_b64;
-  absl::Base64Escape(
-      absl::string_view(reinterpret_cast<const char*>(pub_key),
-                        X25519_PUBLIC_VALUE_LEN),
-      &pub_key_b64);
+  // POST {attestationType:"gcp"} to the iSPIRT KMS /app/key endpoint. The real
+  // key material is released by /app/unwrapKey (see the GCP KMS client); /key
+  // returns the EncryptionKey envelope (kid + keyEncryptionKeyUri).
+  auto http_request = std::make_shared<HttpRequest>();
+  http_request->method = HttpMethod::POST;
+  http_request->path = std::make_shared<Uri>(endpoint);
+  nlohmann::json body;
+  body[kAttestationType] = kGcp;
+  http_request->body = BytesBuffer(body.dump());
+  http_request->headers = std::make_shared<HttpHeaders>();
+  http_request->headers->insert(
+      {std::string(kAuthorizationHeaderKey),
+       absl::StrCat(kBearerTokenPrefix, *token_or)});
 
-  auto request = std::make_shared<GetSessionTokenForTargetAudienceRequest>();
-  request->token_target_audience_uri = std::make_shared<std::string>(
-      sign_request_context.request->key_vending_endpoint
-          ->gcp_private_key_vending_service_cloudfunction_url);
-  request->nonce = std::move(pub_key_b64);
-
-  AsyncContext<GetSessionTokenForTargetAudienceRequest, GetSessionTokenResponse>
-      get_token_context(
-          std::move(request),
-          absl::bind_front(
-              &GcpPrivateKeyFetcherProvider::OnGetSessionTokenCallback, this,
-              sign_request_context),
-          sign_request_context);
-
-  return auth_token_provider_->GetSessionTokenForTargetAudience(
-      get_token_context);
+  sign_request_context.response = std::move(http_request);
+  sign_request_context.result = SuccessExecutionResult();
+  sign_request_context.Finish();
+  return SuccessExecutionResult();
 }
 
-void GcpPrivateKeyFetcherProvider::OnGetSessionTokenCallback(
-    AsyncContext<PrivateKeyFetchingRequest, core::HttpRequest>&
-        sign_request_context,
-    AsyncContext<GetSessionTokenForTargetAudienceRequest,
-                 GetSessionTokenResponse>& get_token_context) noexcept {
-  if (!get_token_context.result.Successful()) {
-    SCP_ERROR_CONTEXT(
-        kGcpPrivateKeyFetcherProvider, sign_request_context,
-        get_token_context.result,
-        "Failed to get the access token for audience target %s.",
-        get_token_context.request->token_target_audience_uri->c_str());
-    auto error_message = google::scp::core::errors::GetErrorMessage(
-        get_token_context.result.status_code);
-    PS_LOG(ERROR, log_context_)
-        << "Failed to get the access token for audience target "
-        << get_token_context.request->token_target_audience_uri->c_str()
-        << ". Error message: " << error_message;
-    sign_request_context.Finish(get_token_context.result);
+ExecutionResult GcpPrivateKeyFetcherProvider::FetchPrivateKey(
+    AsyncContext<PrivateKeyFetchingRequest, PrivateKeyFetchingResponse>&
+        private_key_fetching_context) noexcept {
+  AsyncContext<PrivateKeyFetchingRequest, HttpRequest>
+      sign_http_request_context(
+          private_key_fetching_context.request,
+          bind(&GcpPrivateKeyFetcherProvider::SignHttpRequestCallback, this,
+               private_key_fetching_context, _1),
+          private_key_fetching_context);
+
+  return SignHttpRequest(sign_http_request_context);
+}
+
+void GcpPrivateKeyFetcherProvider::SignHttpRequestCallback(
+    AsyncContext<PrivateKeyFetchingRequest, PrivateKeyFetchingResponse>&
+        private_key_fetching_context,
+    AsyncContext<PrivateKeyFetchingRequest, HttpRequest>&
+        sign_http_request_context) noexcept {
+  auto execution_result = sign_http_request_context.result;
+  if (!execution_result.Successful()) {
+    SCP_ERROR_CONTEXT(kGcpPrivateKeyFetcherProvider,
+                      private_key_fetching_context, execution_result,
+                      "Failed to sign http request.");
+    private_key_fetching_context.result = execution_result;
+    private_key_fetching_context.Finish();
     return;
   }
 
-  const auto& access_token = *get_token_context.response->session_token;
-  auto http_request = std::make_shared<HttpRequest>();
-  PrivateKeyFetchingClientUtils::CreateHttpRequest(
-      *sign_request_context.request, *http_request);
-  http_request->headers = std::make_shared<core::HttpHeaders>();
-  http_request->headers->insert(
-      {std::string(kAuthorizationHeaderKey),
-       absl::StrCat(kBearerTokenPrefix, access_token)});
-  sign_request_context.response = std::move(http_request);
-  sign_request_context.Finish(SuccessExecutionResult());
+  AsyncContext<HttpRequest, HttpResponse> http_client_context(
+      std::move(sign_http_request_context.response),
+      bind(&GcpPrivateKeyFetcherProvider::PrivateKeyFetchingCallback, this,
+           private_key_fetching_context, _1),
+      private_key_fetching_context);
+  execution_result = http_client_->PerformRequest(http_client_context);
+  if (!execution_result.Successful()) {
+    SCP_ERROR_CONTEXT(
+        kGcpPrivateKeyFetcherProvider, private_key_fetching_context,
+        execution_result,
+        "Failed to perform http request to reach endpoint %s.",
+        private_key_fetching_context.request->key_vending_endpoint
+            ->private_key_vending_service_endpoint.c_str());
+    private_key_fetching_context.result = execution_result;
+    private_key_fetching_context.Finish();
+  }
+}
+
+void GcpPrivateKeyFetcherProvider::PrivateKeyFetchingCallback(
+    AsyncContext<PrivateKeyFetchingRequest, PrivateKeyFetchingResponse>&
+        private_key_fetching_context,
+    AsyncContext<HttpRequest, HttpResponse>& http_client_context) noexcept {
+  private_key_fetching_context.result = http_client_context.result;
+  if (!http_client_context.result.Successful()) {
+    SCP_ERROR_CONTEXT(
+        kGcpPrivateKeyFetcherProvider, private_key_fetching_context,
+        private_key_fetching_context.result, "Failed to fetch private key.");
+    private_key_fetching_context.Finish();
+    return;
+  }
+
+  std::string resp(http_client_context.response->body.bytes->begin(),
+                   http_client_context.response->body.bytes->end());
+
+  nlohmann::json private_key_resp;
+  try {
+    private_key_resp = nlohmann::json::parse(resp);
+  } catch (const nlohmann::json::parse_error& e) {
+    std::string error_message =
+        "Received http response could not be parsed into a JSON: ";
+    error_message += e.what();
+    SCP_ERROR_CONTEXT(kGcpPrivateKeyFetcherProvider,
+                      private_key_fetching_context, http_client_context.result,
+                      error_message);
+    private_key_fetching_context.result = http_client_context.result;
+    private_key_fetching_context.Finish();
+    return;
+  }
+  if (!private_key_resp.contains(kWrappedKid)) {
+    SCP_ERROR_CONTEXT(kGcpPrivateKeyFetcherProvider,
+                      private_key_fetching_context, http_client_context.result,
+                      "/key did not provide the wrappedKid property");
+    private_key_fetching_context.result = http_client_context.result;
+    private_key_fetching_context.Finish();
+    return;
+  }
+  if (!private_key_resp.contains(kWrapped)) {
+    SCP_ERROR_CONTEXT(kGcpPrivateKeyFetcherProvider,
+                      private_key_fetching_context, http_client_context.result,
+                      "/key did not provide the wrapped property");
+    private_key_fetching_context.result = http_client_context.result;
+    private_key_fetching_context.Finish();
+    return;
+  }
+
+  std::string wrapped = private_key_resp[kWrapped];
+  BytesBuffer buffer(wrapped);
+  PrivateKeyFetchingResponse response;
+  auto result =
+      PrivateKeyFetchingClientUtils::ParsePrivateKey(buffer, response);
+  if (!result.Successful()) {
+    SCP_ERROR_CONTEXT(
+        kGcpPrivateKeyFetcherProvider, private_key_fetching_context,
+        private_key_fetching_context.result, "Failed to parse private key.");
+    private_key_fetching_context.result = result;
+    private_key_fetching_context.Finish();
+    return;
+  }
+
+  private_key_fetching_context.response =
+      std::make_shared<PrivateKeyFetchingResponse>(response);
+  private_key_fetching_context.Finish();
 }
 
 std::unique_ptr<PrivateKeyFetcherProviderInterface>

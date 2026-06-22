@@ -25,11 +25,14 @@ cc_library(
     deps = [
         "//src/core/http2_client",
         "//src/cpio/client_providers/auth_token_provider/gcp:gcp_auth_token_provider",
+        "//src/cpio/client_providers/confidential_space:confidential_space_token_fetcher",
         "//src/cpio/client_providers/interface:cpio_client_providers_interface",
         "//src/cpio/client_providers/interface:type_def",
         "//src/cpio/client_providers/private_key_fetcher_provider",
         "//src/public/core/interface:execution_result",
         "//src/public/cpio/interface/private_key_client:type_def",
+        "@com_google_absl//absl/strings",
+        "@nlohmann_json//:lib",
     ],
 )
 

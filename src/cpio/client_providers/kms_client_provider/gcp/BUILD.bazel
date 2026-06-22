@@ -28,6 +28,32 @@ cc_library(
     ],
 )
 
+# iSPIRT/DEPA: GCP Confidential Space KMS client that unwraps HPKE keys against
+# the iSPIRT KMS /app/unwrapKey (instead of Google Cloud KMS). Selected for
+# gcp_cpio_lib_inside_tee in //src/cpio/client_providers/kms_client_provider.
+cc_library(
+    name = "tee_gcp_unwrap_kms_client_provider",
+    srcs = ["gcp_unwrap_kms_client_provider.cc"],
+    hdrs = ["gcp_unwrap_kms_client_provider.h"],
+    deps = [
+        ":error_codes",
+        "//src/core/interface",
+        "//src/core/interface:async_context",
+        "//src/core/utils:core_utils",
+        "//src/cpio/client_providers/confidential_space:confidential_space_token_fetcher",
+        "//src/cpio/client_providers/global_cpio",
+        "//src/cpio/client_providers/interface:cpio_client_providers_interface",
+        "//src/cpio/client_providers/kms_client_provider/azure:azure_kms_client_provider_utils",
+        "//src/public/cpio/interface:cpio_errors",
+        "//src/public/cpio/interface/kms_client:type_def",
+        "@com_google_absl//absl/base:nullability",
+        "@com_google_absl//absl/functional:bind_front",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@nlohmann_json//:lib",
+    ],
+)
+
 cc_library(
     name = "nontee_gcp_kms_client_provider",
     deps = [

@@ -34,7 +34,9 @@ cc_library(
                     "//src/cpio/client_providers/kms_client_provider/azure:nontee_azure_kms_client_provider",
                 ],
                 "//src/public/cpio/interface:gcp_cpio_lib_inside_tee": [
-                    "//src/cpio/client_providers/kms_client_provider/gcp:tee_gcp_kms_client_provider",
+                    # iSPIRT/DEPA: unwrap against the iSPIRT KMS /app/unwrapKey
+                    # (Confidential Space OIDC + RSA wrapping), not Google Cloud KMS.
+                    "//src/cpio/client_providers/kms_client_provider/gcp:tee_gcp_unwrap_kms_client_provider",
                 ],
                 "//src/public/cpio/interface:gcp_cpio_lib_outside_tee": [
                     "//src/cpio/client_providers/kms_client_provider/gcp:nontee_gcp_kms_client_provider",
