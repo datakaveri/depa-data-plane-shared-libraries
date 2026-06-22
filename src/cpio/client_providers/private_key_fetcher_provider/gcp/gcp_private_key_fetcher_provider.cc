@@ -34,7 +34,6 @@
 #include "error_codes.h"
 
 using google::scp::core::AsyncContext;
-using google::scp::core::BytesBuffer;
 using google::scp::core::ExecutionResult;
 using google::scp::core::FailureExecutionResult;
 using google::scp::core::HttpClientInterface;
@@ -110,7 +109,7 @@ ExecutionResult GcpPrivateKeyFetcherProvider::SignHttpRequest(
   http_request->path = std::make_shared<Uri>(endpoint);
   nlohmann::json body;
   body[kAttestationType] = kGcp;
-  http_request->body = BytesBuffer(body.dump());
+  http_request->body = std::make_shared<std::string>(body.dump());
   http_request->headers = std::make_shared<HttpHeaders>();
   http_request->headers->insert(
       {std::string(kAuthorizationHeaderKey),
@@ -181,8 +180,7 @@ void GcpPrivateKeyFetcherProvider::PrivateKeyFetchingCallback(
     return;
   }
 
-  std::string resp(http_client_context.response->body.bytes->begin(),
-                   http_client_context.response->body.bytes->end());
+  const std::string& resp = *http_client_context.response->body;
 
   nlohmann::json private_key_resp;
   try {
@@ -215,8 +213,8 @@ void GcpPrivateKeyFetcherProvider::PrivateKeyFetchingCallback(
     return;
   }
 
-  std::string wrapped = private_key_resp[kWrapped];
-  BytesBuffer buffer(wrapped);
+  auto buffer = std::make_shared<std::string>(
+      private_key_resp[kWrapped].get<std::string>());
   PrivateKeyFetchingResponse response;
   auto result =
       PrivateKeyFetchingClientUtils::ParsePrivateKey(buffer, response);

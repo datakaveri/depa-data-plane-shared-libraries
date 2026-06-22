@@ -28,7 +28,6 @@ using google::cmrt::sdk::kms_service::v1::DecryptRequest;
 using google::cmrt::sdk::kms_service::v1::DecryptResponse;
 using google::scp::core::AsyncContext;
 using google::scp::core::AsyncExecutorInterface;
-using google::scp::core::BytesBuffer;
 using google::scp::core::ExecutionResult;
 using google::scp::core::FailureExecutionResult;
 using google::scp::core::HttpClientInterface;
@@ -182,7 +181,7 @@ absl::Status GcpUnwrapKmsClientProvider::Decrypt(
   http_context.request = std::make_shared<HttpRequest>();
   http_context.request->path = std::make_shared<Uri>(unwrap_url_);
   http_context.request->method = HttpMethod::POST;
-  http_context.request->body = BytesBuffer(payload.dump());
+  http_context.request->body = std::make_shared<std::string>(payload.dump());
   http_context.request->headers = std::make_shared<HttpHeaders>();
   http_context.request->headers->insert(
       {std::string(kAuthorizationHeaderKey),
@@ -216,8 +215,7 @@ void GcpUnwrapKmsClientProvider::OnDecryptCallback(
     return;
   }
 
-  std::string resp(http_client_context.response->body.bytes->begin(),
-                   http_client_context.response->body.bytes->end());
+  const std::string& resp = *http_client_context.response->body;
   nlohmann::json unwrap_resp;
   try {
     unwrap_resp = nlohmann::json::parse(resp);
